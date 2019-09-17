@@ -1,0 +1,544 @@
+---
+title: 'Práctica final: kNN'
+author: "Antonio Manuel Milán Jiménez"
+date: "6 de marzo de 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(warning = TRUE)
+```
+
+#Conjunto de datos
+
+Antes de proceder al preprocesamiento es importante analizar el conjunto de datos con el que se está trabajando. De esta forma, se leen los datos, tanto 'train' como 'test', y se estudia su estructura:
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(Hmisc)
+library(class)
+set.seed(100)
+
+#Lectura de train
+datosTrain <- read.csv("train.csv", na.strings=c(" ","NA","?"))
+#Lectura de test
+datosTest <- read.csv("test.csv", na.strings=c(" ","NA","?"))
+
+#Convertir a tibble
+datosTrain <- as.tibble(datosTrain)
+datosTest <- as.tibble(datosTest)
+
+#Dimensiones de los datos
+dim(datosTrain)
+dim(datosTest)
+
+#Variables
+colnames(datosTrain)
+colnames(datosTest)
+```
+
+Los datos de entrenamiento consisten en 9144 instancias de 51 variables, mientras que los datos de test constan de 3919 instancias de 50 variables. Observando el nombre de las variables se comprueba que son precisamente la numeración de éstas. Finalmente, la última variable de los datos de entrenamiento, 'C', se corresponda de la variable de clase a predecir.
+
+ \ 
+ 
+Si se estudian detenidamente las distribución de estas variables:
+
+```{r}
+Hmisc::describe(datosTrain[,1:7])
+```
+
+
+Sucede para todas las variables, aunque aquí sólo se han mostrado las primeras 7 variables, que un 0.3% de las instancias poseen un valor en todas ellas en torno a -69000; que observando el resto de la proporción de valores se identifican rápidamente como 'ruido', valores posiblemente mal tomados que deberán ser tratados. Además, se muestra también que para todas las variables hay valores perdidos que igualmente tendrán que tratarse.
+
+ \ 
+ 
+ Para la variable 'C' se observa que no hay ningún valor perdido. Además, si se estudia su rango de valores:
+ 
+```{r}
+unique(datosTrain["C"])
+```
+ 
+Se comprueba que sólo se tienen los valores de clase '0' y '1'. Gracias a que se indique que la media para esta variable predictora es de 0.344, ya se puede saber que para esta variable los datos no están todo lo bien balanceados que se quisiese, algo que se verá más adelante.
+
+ \ 
+ 
+Por último, si se realiza este mismo estudio para los datos de test:
+ 
+```{r}
+Hmisc::describe(datosTest[,1:7])
+```
+ 
+ 
+Se descubre que sucede lo mismo: el 0.4% de las instancias poseen un valor en torno a -69000 para todas las variables que las hace determinar como 'ruido', siendo igualmente necesario que se traten de alguna forma. Sin embargo, para estos datos de test no hay ninguna instancia que tenga algún valor pérdido en alguna de sus variables.
+
+\newpage
+
+#Preprocesamiento
+
+En esta sección se estudiarán diferentes técnicas utilizadas sobre los datos para 'prepararlos' para poder construir el modelo de clasificación sobre ellos.
+
+
+##Datos perdidos
+
+Uno de los primeros problemas encontrados es que los datos de entrenamiento contienen instancias para las que en algunas de sus variables poseen valores perdidos. Estudiando la distribución de estos:
+
+```{r}
+library(mice)
+#Gráfico de los datos perdidos
+patron <- mice::md.pattern(x=datosTrain,plot = TRUE)
+#Distribución de instancias completas e incompletas
+mice::ncc(datosTrain)
+mice::nic(datosTrain)
+```
+
+De las 9144 instancias en los datos de entrenamiento, 7778 de ellas no tienen ningún valor perdido por lo que se cuenta con 1366 instancias para las que sí existe este problema que, gracias al gráfico mostrado, se descubre que cada una de ellas sólo poseé un valor perdido, es decir, ninguna instancia tiene más de una variable para la que no se tenga un valor determinado. Esto es un punto interesante a la hora de elegir qué técnica emplear para este problema:
+
+###Eliminación de instancias con algún valor perdido
+
+El método más simple, aunque a la vez más drástico, sería eliminar toda aquella instancia que posea algún 'missing value' de la forma:
+
+```{r}
+dim(na.omit(datosTrain))
+```
+
+Sin embargo, no resulta la mejor opción cuando hay demasiados datos que presentan este problema y, en este caso particular, cuando se ha observado que tan sólo hay un valor perdido para cada instancia, no resultando entonces una buena idea deshechar toda la instancia por un sólo valor.
+
+ \ 
+ 
+Frente a esto surge otra técnica:
+
+###Imputación
+
+Consiste en estimar el valor perdido en función del resto de datos para los que sí se tiene información acerca de esa variable. En este caso se ha elegido concretamente el método 'Amelia' que combina el algoritmo 'EM' (Expectation-Maximization) + Boostrap para poder estimar los datos perdidos del 'dataset'. Además, mediante el parámetro 'm', se puede indicar el número de 'datasets' creado para posteriormente hacer la media de los valores imputados y poder conseguir una mejor estimación.
+
+```{r}
+library(Amelia)
+#Imputación mediante Amelia
+imputados <- Amelia::amelia(datosTrain, m=3, parallel="multicore",noms="C")
+datosTrain <- imputados$imputations$imp1
+#Comprobación de datos incompletas
+mice::nic(datosTrain)
+dim(datosTrain)
+```
+
+Se observa que ya no hay ninguna instancia incompleta y que se han conservado todas ellas.
+
+##Eliminación de ruido
+
+Como se ha observado anteriormente, en torno al 0.3%-0.4% de las instancias se podían considerar directamente como ruido (valores en torno a -69000). No obstante, probablemente haya otras instancias también que se puedan considerar como ruido por alguno de sus valores más 'anómalos'. Para solventar este problema, en los datos de entrenamiento, se eliminarán aquellas instancias que se consideren como ruido y que dificultarían el aprendizaje del modelo, siempre que se posean los suficientes datos.
+
+###IPF
+
+En este estudio se ha empleado el método 'IPF' para la eliminación de ruido, empleando éste modelo log-lineales que iterativamente se ajustan y van determinando qué instancias se podrían considerar como ruido.
+
+```{r}
+library(NoiseFiltersR)
+datosTrainConRuido <- datosTrain
+
+#Se estructuran los datos para que sean aceptados por el método
+datosTrain <- as.data.frame(datosTrain)
+datosTrain[,ncol(datosTrain)] <- as.factor(datosTrain[,ncol(datosTrain)])
+
+#Se realiza IPF
+out <- IPF(C~.,data=datosTrain)
+length(out$remIdx)
+
+#Se actualizan los datos eliminando aquellas instancias detectadas como anomalías
+datosTrain <- as.tibble(datosTrain[setdiff(1:nrow(datosTrain),out$remIdx),])
+datosTrain[,ncol(datosTrain)] <- as.numeric(unlist(datosTrain[,ncol(datosTrain)]))
+```
+
+
+Se detectan un total de 1596 instancias como ruido que son eliminadas.
+
+
+###Detección de anomalías
+
+Otro punto interesante es detectar anomalías que haya en el conjunto de datos mediante 'kMeans', calculando la distancia que haya de las instancias a los diferentes centroides. Así, se identificaron como anomalías aquellas instancias que tengan datos extremos o que sea una combinación de dos o más variables lo que las convierte en instancias inusuales. Dado que no se sabe cuántas anomalías puede haber, se determina un porcentaje de forma que las 'n' instancias con mayor distancia se consideren outliers:
+
+```{r}
+#Se van a detectar el 10% de las instancias como outliers
+numero.de.outliers = as.integer(dim(datosTrainConRuido)[1]/10)
+
+#
+modelo.kmeans <- kmeans(datosTrainConRuido,2)
+indices.clustering <- modelo.kmeans$cluster
+centroides <- modelo.kmeans$centers
+  
+distancias_a_centroides = function (datos,indices.asignacion.clustering,datos.centroides){
+      sqrt(rowSums(   (datos - datos.centroides[indices.asignacion.clustering,])^2   ))
+}
+  
+dist.centroides <- distancias_a_centroides(datosTrainConRuido, indices.clustering, centroides)
+top.outliers <- order(dist.centroides, decreasing = TRUE)[1:numero.de.outliers]
+datosTrainConRuido <- datosTrainConRuido[-top.outliers,]
+dim(datosTrainConRuido)
+```
+
+De esta forma se eliminarían los datos considerados más ruidosos, dado un determinado porcentaje, en función de los anómalos que sean los valores de éstos.
+
+
+###Eliminación de ruido en datos de test
+
+El tratamiento del ruido en los datos de test tiene que ser diferente pues no se puede eliminar directamente una instancia de test. Para solucionarlo se detecta primero aquellas instancias de test que poseían esos valores 'ruidosos' en torno a -69000:
+
+```{r}
+ruido <- which(datosTest[,1] < -68900)
+ruido
+```
+
+Sabiendo ya las instancias con ruido, se procede a sustituir este ruido por la mediana del resto de valores de los datos que no son ruido:
+
+```{r}
+medianas <- apply(datosTest[-ruido,],2,median)
+cambio <- matrix(rep(medianas,length(ruido)),length(ruido),ncol(datosTest),byrow=TRUE)
+datosTest[ruido,]<-cambio
+```
+
+
+##Normalización
+
+Por supuesto, otro punto interesante en el preprocesamiento es la normalización de los datos. Esto se realiza para evitar que la distribución y el rango en el que se encuentran las variables influyan en el modelo de modo que prevalezcan unas sobre otras simplemente por este hecho.
+
+```{r}
+require(caret)
+
+#Se estima el centrado y escalado en función de los datos de entrenamiento
+datosPreprocesados <- caret::preProcess(datosTrain[,1:50],method=c("center","scale"))
+
+#Se centran y escalan los datos de entrenamiento
+datosTransformados <- predict(datosPreprocesados,datosTrain[,1:50])
+
+#Se añade la variable predecir que no se puede modificar
+datosTrain <- cbind(datosTransformados,datosTrain[,51])
+
+#Se centran y escalan los datos de test en función del centrado y escalado que se había calculado
+datosTest <- predict(datosPreprocesados,datosTest)
+datosTrain <- as.tibble(datosTrain)
+datosTest <- as.tibble(datosTest)
+```
+
+
+
+##Selección de variables
+
+Este conjunto de datos consta de 50 variables predictoras. Sin embargo, no necesariamente las 50 variables van a ser igual de independientes entre ellas y todas vayan a ser determinantes para contruir el modelo y determinar la variable de salida. Perfectamente puede suceder que dos variables sean muy similares entre ellas, aportando la misma información para el modelo y siendo redundante utilizar ambas. Otro caso que puede darse es que simplemente una variable no aporte información útil para estimar la variable a predecir y podamos entonces prescindir de ella.
+
+Esto hace que sea interesante seleccionar solamente aquellas variables que sean realmente útiles para poder así disminuir la complejidad del modelo e incluso, en algunos casos, mejorar el comportamiento de éste.
+
+###Correlación de variables
+
+Una técnica para la selección de variables consiste en estudiar la correlación entre ellas, descubrir cómo de similares son entre ellas y eliminar así aquellas variables ya estén siendo representadas por otras variables respecto a la información que aportan.
+
+
+```{r}
+#Construcción matriz de correlación
+
+limite <- ncol(datosTrain)-1
+corrMatrix <- cor(na.omit(datosTrain[,1:limite]))
+corrplot::corrplot(corrMatrix,order="FPC",type="upper",tl.col="black",tl.srt=45)
+```
+
+
+Gracias al rango de colores de este gráfico descubrimos que un alto porcentaje de las variables están correladas en gran medida, cercanas a 1. Esto ya indica que hay bastante información irrelevante debido a que ya aparece en otras variables y que, aún con un filtrado bastante estricto, se reducirá considerablemente la dimensionalidad de los datos.
+
+ \ 
+ 
+Empezando con un filtrado en el que se eliminen aquellas variables con una correlación mayor del 90%:
+
+```{r}
+altamenteCorreladas <- caret::findCorrelation(corrMatrix, cutoff=0.9)
+length(altamenteCorreladas)
+```
+
+Se descubre que hay 40 variables, de las 50 presentes en el 'dataset', que cumplen esta condición; una correlación muy alta que ya se presentaba en el gráfico anterior. Probando ahora con un filtrado mucho más estricto:
+
+```{r}
+altamenteCorreladas <- caret::findCorrelation(corrMatrix, cutoff=0.99)
+length(altamenteCorreladas)
+```
+
+Incluso con un filtrado de aquellas variables que presentan una correlación del 99%, se vuelven a tener 40 variables que lo cumplen. Teniendo en cuenta este hecho, se puede optar por este filtrado en el que se reduciría el 'dataset' de 50 variables predictoras a 10 o, por el contrario, si se quiere conservar más variables aumentar aun más el filtrado:
+
+```{r}
+altamenteCorreladas <- caret::findCorrelation(corrMatrix, cutoff=0.9999)
+length(altamenteCorreladas)
+```
+
+Es necesario una correlación del 99.99% para poder filtrar de 50 variables a 28 que lo cumplan.
+
+ \ 
+ 
+Una vez decidido el filtrado, se aplica tanto a los datos de entrenamiento como a los de test:
+
+```{r}
+datosTrainFiltrados <- datosTrain[,-altamenteCorreladas]
+datosTestFiltrados <- datosTest[,-altamenteCorreladas]
+dim(datosTrainFiltrados)
+dim(datosTestFiltrados)
+```
+
+Y así se realizaría este método de selección de variables.
+
+###CFS
+
+Otro método de selección de variables es mediante un filtrado CFS, en el que se combinan tanto medidas de correlación como de entropía entre variables:
+
+```{r}
+library(FSelector)
+
+subset <- FSelector::cfs(C ~ .,datosTrain)
+subset
+```
+
+Sin embargo, dada la alta correlación ya vista que presenta este conjunto de datos, deshecha todas las variables y únicamente selecciona la variable 'X16' por lo que no resulta tan útil en este caso particular.
+
+###Consistency
+
+Otra posibilidad es hacer la selección en función de la consistencia que haya entre las variables, algo que realiza el método 'consistency':
+
+```{r, eval=FALSE}
+subset <- consistency(C~.,datosTrain)
+```
+
+Las variables finalmente seleccionadas por este método son:
+
+"X1"  "X3"  "X5"  "X7"  "X9"  "X10" "X13" "X15" "X18" "X20" "X22" "X26" "X28" "X30" "X32" "X38" "X42" "X49"
+
+ \ 
+ 
+Una selección interesante para poder reducir la dimensionalidad del conjunto de datos sin perder información sobre él.
+
+###Relief
+
+Con esta técnica se asocian pesos a cada una de las variables en función de la distancia que haya entre las instancias. Con estos pesos asociados, se apoya en la función 'cutoff' para seleccionar finalmente las variables:
+
+```{r, eval=FALSE}
+weights <- FSelector::relief(C ~.,datosTrain,neighbours.count = 30,sample.size = 120)
+subset <- FSelector::cutoff.k(weights,2)
+```
+
+Sin embargo, nuevamente se han eliminado demasiadas variables, seleccionando únicamente las variables 'X3' y 'X16'. Posiblemente, al haber una correlación tan alta entre las variables, se haya detectado una distancia muy baja y se hayan determinado únicamente estas dos variable como relevantes.
+
+
+###PCA
+
+También se puede aplicar uno de los métodos más famosos de selección de atributos, el Análisis de Componentes Principales, en el que se estudia cuánto aporta cada una de las variables a las componentes principales y en función de ello se pueden seleccionar la variables más relevantes para el modelo.
+
+```{r}
+library(FactoMineR)
+library(factoextra)
+limite <- ncol(datosTrain)-1
+res.pca <- PCA(datosTrain[,1:limite],graph = FALSE)
+
+#Se seleccionan aquellas componentes que conformen el 98% del total, consiguiendo así las
+#componentes más importantes
+topComponentes <- unname(which(res.pca$eig[,3]>98)[1])
+
+#Para estas componentes escogidas, se obtiene la contribución de las variables a ellas  
+contrib <- fviz_contrib(res.pca,choice="var",axes=1:topComponentes)
+
+#Gracias a que se devuelven las variables ordenadas en función de su contribución, se 
+#escogen los dos primeros tercios, es decir, el 66% de las variables que en función de
+#su contribución a las componentes son más importantes
+topVars <- as.integer(ncol(datosTrain)/1.5)
+subset <- contrib$data$name[order(contrib$data$contrib,decreasing = TRUE)][1:topVars]
+subset <- unlist(lapply(subset,toString))
+subset
+```
+
+Estas son las variables seleccionadas por PCA. Por supuesto, se pueden escoger diferentes proporciones en cuanto a las componentes que escoger y a las contribuciones por parte de las variables, para encontrar otras selecciones de variables.
+
+ \ 
+ 
+Una vez determinada la selección de variables, se aplica sobre los datos de entrenamiento y los de test:
+
+```{r}
+datosTrain <- datosTrain[,c(subset,"C")]
+datosTest <- datosTest[,subset]
+datosTrain[,"C"] <- datosTrain[,"C"] - 1
+dim(datosTrain)
+dim(datosTest)
+```
+
+
+
+##Balanceo de clases
+
+
+Algo que ya se pudo adelantar anteriormente al analizar el conjunto de datos es que para la variable de clase C, los datos no estaban todo lo bien balanceados que se quisiese. Es decir, hay considerablemente más instancias de una clase que otra, algo que puede resultar en que el modelo no aprenda correctamente para ambas clases:
+
+```{r}
+ggplot(data=datosTrain) + geom_bar(mapping =aes(x=C,y=..prop..,group=1))
+resumen <- dplyr::group_by(datosTrain,C) %>% dplyr::summarise(nc=n())
+resumen
+```
+
+
+Efectivamente estos datos presentan un desbalanceo considerable, habiendo 5512 instancias para una clase y 2036 instancias para la otra, es decir, una relación de 73% a 27%.
+
+ \ 
+ 
+Para solventar este problema se pueden utilizar técnicas de 'undersampling', en las que se disminuye el número de instancias para la clase mayoritaria, técnicas de 'oversampling', en las que se aumenta el número de instancias para la clase minoritaria, e incluso una hibridación de ambas técnicas.
+
+ \ 
+ 
+Uno de los métodos más utilizados es 'SMOTE', en el que a partir de dos instancias se calcula y se crea una nueva instancia para esa clase minoritaria:
+
+```{r}
+library(DMwR)
+datosTrainBalanceados <- datosTrain
+datosTrainBalanceados$C <- as.factor(datosTrainBalanceados$C)
+datosTrainBalanceados <- SMOTE(C~., as.data.frame(datosTrainBalanceados), perc.over=100)
+resumen <- dplyr::group_by(datosTrainBalanceados,C) %>% dplyr::summarise(nc=n())
+print(resumen)
+```
+
+
+Ahora sí se tendrían los datos de entrenamiento balanceados.
+
+ \ 
+ 
+Por supuesto, existen muchas otras técnicas para conseguir el balanceo de los datos. Así, haciendo uso de la función 'oversample' se pueden emplear métodos tales como 'MWMOTE' o 'DBSMOTE' entre otros:
+
+```{r}
+library(imbalance)
+datosTrainBalanceados <- imbalance::oversample(as.data.frame(datosTrain), ratio = 0.85,
+                                               method = "MWMOTE", classAttr = "C")
+resumen <- dplyr::group_by(datosTrainBalanceados,C) %>% dplyr::summarise(nc=n())
+print(resumen)
+
+datosTrainBalanceados <- imbalance::oversample(as.data.frame(datosTrain), ratio = 0.85,
+                                               method = "ADASYN", classAttr = "C")
+resumen <- dplyr::group_by(datosTrainBalanceados,C) %>% dplyr::summarise(nc=n())
+print(resumen)
+```
+
+
+\newpage
+
+#Clasificación
+
+Una vez preprocesados los datos, ya se puede proceder a contruir el modelo que determinará la clase para los datos de test. Para construcción del modelo se ha escogido el algoritmo kNN, que determina la clase de una instancia en función de sus 'k' vecinos más cercanos. Para este algoritmo, el parámetro más significativo es 'k', el número de 'vecinos' más cercanos a tener en cuenta para determianr la clase correspondiente. 
+
+ \ 
+ 
+La determinación  de este parámetro se puede hacer experimentalmente, simplemente entrenando el modelo con diferentes 'k' y observando con cual o cuales se obtienen mejores resultados. Para saber qué acierto se está obteniendo, se realizará validación cruzada sobre los datos de entrenamiento para tener una idea sobre cómo de bien o mal funciona el modelo.
+
+```{r}
+#Se divide los datos de entrenamiento en pseudoTrain y pseudoTest a relación de 85%-15%
+misDatosTrain <- datosTrain
+shuffled <- sample(dim(misDatosTrain)[1])
+eightypct <- (dim(misDatosTrain)[1] * 85) %/% 100
+datosTrainPseudo <- misDatosTrain[shuffled[1:eightypct], 1:(dim(misDatosTrain)[2]-1)]
+datosTestPseudo <- misDatosTrain[shuffled[(eightypct+1):dim(misDatosTrain)[1]],
+                                 1:(dim(misDatosTrain)[2]-1)]
+datosTrainPseudo_labels <- misDatosTrain[shuffled[1:eightypct], dim(misDatosTrain)[2]]
+datosTrainPseudo_labels <-as.data.frame(datosTrainPseudo_labels)[,1]
+datosTestPseudo_labels <- misDatosTrain[shuffled[(eightypct+1):dim(misDatosTrain)[1]],
+                                        dim(misDatosTrain)[2]]
+datosTestPseudo_labels <- as.data.frame(datosTestPseudo_labels)[,1]
+
+
+getKnn <- function(miK){
+     
+  #Se entrena el modelo con la 'k' indicada                                                                                 
+  test_pred <- knn(train = datosTrainPseudo, test = datosTestPseudo,
+                   cl = datosTrainPseudo_labels, k=miK)
+  
+  #Se estructura la predicción realizada
+  test_pred <- as.vector(test_pred)
+  test_pred[which(is.na(test_pred))] <- 2
+  test_pred <- as.numeric(test_pred)
+  
+  #Se contruye la matriz de confusión y se devuelve el acierto obtenido por el modelo
+  u <- union(test_pred, datosTestPseudo_labels)
+  t <- table(factor(test_pred, u), factor(datosTestPseudo_labels, u))
+  cm<-confusionMatrix(t)
+  cm$overall["Accuracy"]
+  
+}
+
+
+result1 <- lapply(1:150*2-1,getKnn)
+```
+
+```{r,echo=FALSE}
+r1 <- unlist(result1)
+df <- data.frame(k=1:150*2-1,accuracy=r1)
+ggplot(df, aes(x=k,y=accuracy)) + geom_histogram(stat="identity",color="black",
+          fill="deepskyblue")+coord_cartesian(ylim=c(0.8,0.95)) + labs(title="Acierto de kNN con diferentes k") 
+```
+
+
+Así, rapidamente se descubre que los mejores resultados se obtienen con un 'k' en torno 20-100. Con una 'k' menor que 20 los resultados son peores y a partir de 100 se aprecia una pérdida progresiva del acierto. Si se observa detenidamente los 30 mejores resultados:
+
+```{r}
+(1:150*2-1)[order(r1,decreasing=TRUE)[1:30]]
+```
+
+En terminos generales, los mejores aciertos se obtienen con una 'k' en torno a 30, por lo que serán los valores más interesantes para construir el modelo final que realice la predicción de los datos de test.
+
+ \ 
+ 
+Otro parámetro del algoritmo kNN es el parámetro 'l', que indica el número de votos mínimos por parte de los vecinos para tomar una decisión sobre la instancia a clasificar. En caso de que no se consiga el mínimo de votos, la instancia se clasifica como 'duda'; algo interesante pero que en este caso particular sólo se quiere una clasificación binaria, por lo que este parámetro se mantendrá en 0.
+
+
+#Resultados obtenidos
+
+Aquí se presentan los aciertos obtenidos por los diferentes modelos construidos sobre los datos de test, es decir, los resultados obtenidos en la plataforma de Kaggle:
+
+\newpage
+
+| Amelia | IPF | Supr. Anomalias | Normalizacion | Filtrado Corr. | Seleccion | Balanceo | k | Acierto | 
+|:-------------------:|:---------:|:-----------------:|:-----------------:|:--------------:|:---------------------:|:------------:|:---------------------:|:------------:|:------------:|
+| folds=1 |  |  |  | 0.9999  |  |  | 7 | 84.07% |
+| folds=1 |  |  |  | 0.99999 |  |  MWMOTE | 7 | 81.62% |
+| folds=1 |  | X (5%)  |  | 0.99999 |  |  MWMOTE | 7 | 78.05% |
+| folds=1  |  | X (5%) | X | 0.999999  |  |  MWMOTE | 7 | 78.66% |
+| folds=1  |  |  | X | 0.9999 |  |  | 7 | 85.29% |
+| folds=1  |  | X (5%) | X | 0.9999 |  |  | 7 | 85.04% |
+| folds=1 |  |  |  X | 0.99  |  |  | 7 | 85.34% |
+| folds=1 |  |  |  X | 0.85 |  |  | 7 | 84.89% |
+| folds=1 |  |  |  X | 0.999999 |  |  | 7 | 85.29% |
+| folds=1 |  |  |  X | 0.9999 |  |  | 50 | 87.59% |
+| folds=1 |  |  |  X | 0.9999 |  |  | 23 | 88% |
+| folds=1 |  |  |  X | 0.999999 |  |  | 23 | 88.1% |
+| folds=1 |  |  |  X | 0.999999 |  |  MWMOTE | 23 | 83.97% |
+| folds=1 |  |  |  X | 0.999999 |  |  ADASYN | 23 | 82.08% |
+| folds=3 |  |  |  X | 0.9999 |  |  | 31 | 85.6% |
+| folds=3 |  |  |  X | 0.9999 |  | SMOTE | 31 | 80.8% |
+| folds=3 |  |  |  X | 0.9999 |  | DBSMOTE | 31 | 84.63% |
+| folds=1 |  | X (3%) |  X | 0.999999 |  |  | 23 | 87.28% |
+| folds=1 |  | X (3%) |  X | 0.999999 |  |  | 28 | 87.54% |
+| folds=3 |  |  |  X | 0.999999 |  |  | 23 | 87.79% |
+| folds=1 |  |  |  X |  |  CFS |  | 23 | 80.55% |
+| folds=1 |  |  |  X | 0.999999 |  |  | 293 | 86.47% |
+| folds=1 | X |  |  X | 0.999999 |  |  | 23 | 87.23% |
+| folds=3 | X |  |  X | 0.9999 |  |  | 23 | 88.1% |
+| folds=3 | X |  |  X | 0.9999 |  | DBSMOTE | 23 | 86.83% |
+| folds=3 | X |  |  X | 0.9999 |  |  | 200 | 86.57% |
+| folds=3 | X |  |  X |  |  |  | 23 | 85.8% |
+| folds=3 | X | X (2%) |  X | 0.9999 |  |  | 23 | 87.69% |
+| folds=3 | X |  |  X |  | Consistency  |  | 23 | 87.13% |
+| folds=3 | X |  |  X | 0.9999 | Consistency |  | 23 | 87.9% |
+| folds=3 | X |  |  X | 0.999999 | Consistency  |  | 23 | 85.29% |
+| folds=3 | X |  |  X |  | PCA 0.9 |  | 23 | 87.64% |
+| folds=3 | X |  |  X |  | PCA 0.95 |  | 23 | 87.44% |
+| folds=3 |  |  |  X |  | PCA 0.9 |  | 23 | 86.98% |
+| folds=3 | X |  |  X |  | PCA 0.9 |  | 31 | 88.46% |
+| folds=3 | X |  |  X |  | PCA 0.97 |  | 180 | 87.08% |
+| folds=3 | X |  |  X |  | PCA 0.97 |  | 23 | 88.56% |
+| folds=3 | X |  |  X |  | PCA 0.98 |  | 19 | 89.38% |
+| folds=3 | X |  |  X |  | PCA 0.98 |  | 11 | 88.71% |
+| folds=3 | X |  |  X |  | PCA 0.98 |  | 28 | 89.53% |
+| folds=3 | X |  |  X |  | PCA 0.95 |  | 28 | 88.71% |
+| folds=3 | X |  |  X |  | PCA 0.98 |  | 43 | 88.76% |
+| folds=5 | X |  |  X |  | PCA 0.98 |  | 28 | 89.38% |
+| folds=3 | X |  |  X |  | PCA 0.98 | DBSMOTE | 28 | 87.69% |
+
+
+Los mejores resultados se obtuvieron al realizar imputación con Amelia utilizando 3 'folds', realizando IPF para la eliminación de ruido, normalizando los datos, empleando PCA para seleccionar los atributos que representasen el 98% de las componentes principales y una 'k' entre 20 y 30.
